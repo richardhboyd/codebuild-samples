@@ -1,0 +1,12 @@
+[run]
+omit = src/__version__.py
+source = ./src/*
+
+[report]
+include = ./src/*
+
+[xml]
+output = ./test_output/coverage.xml
+
+[pytest]
+addopts = --cov=./src --cov-report=xml

@@ -1,0 +1,26 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions:
+      python: 3.7
+    commands:
+      - pip install -r ./requirements.txt
+      - pip install pytest
+  build:
+    commands:
+      - pytest --junitxml=./test_output/suite.xml --cov ./src
+      - coverage xml
+reports:
+  coverage:
+    files:
+      - coverage.xml
+    base-directory: ./test_output
+    discard-paths: yes
+    file-format: CoberturaXml
+  suite:
+    files:
+      - suite.xml
+    base-directory: ./test_output
+    discard-paths: yes
+    file-format: JunitXml
+    

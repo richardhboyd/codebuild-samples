@@ -1,0 +1,391 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Parameters:
+  MainBranch:
+    Type: String
+    Default: "main"
+    AllowedPattern: "^((?!master).)*$"
+
+Resources:
+  SampleRepository:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: SampleRepository
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+  BuildProjectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+  BuildProjectPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodeBuildPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - codecommit:GetBranch
+              - codecommit:GitPull
+              - codecommit:GetCommit
+              - codecommit:GetUploadArchiveStatus
+              - codecommit:UploadArchive
+              - codecommit:CancelUploadArchive
+            Resource: !GetAtt SampleRepository.Arn
+          -
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetBucketPolicy
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub "${ArtifactBucket.Arn}/*"
+              - !Sub "${ArtifactBucket.Arn}"
+          -
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+          -
+            Effect: Allow
+            Action:
+              - codebuild:CreateReportGroup
+              - codebuild:CreateReport
+              - codebuild:UpdateReport
+              - codebuild:BatchPutTestCases
+              - codebuild:BatchPutCodeCoverages
+            Resource:
+              - !Sub "arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/${BuildProject}-*"
+      Roles:
+        -
+          !Ref BuildProjectRole
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      ServiceRole: !GetAtt BuildProjectRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+
+  PipeLineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName: PipelinePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:UploadArchive
+                  - codecommit:CancelUploadArchive
+                Resource:
+                  - !GetAtt SampleRepository.Arn
+              -
+                Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource:
+                  - !GetAtt BuildProject.Arn
+              -
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetBucketPolicy
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "${ArtifactBucket.Arn}/*"
+                  - !GetAtt ArtifactBucket.Arn
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt PipeLineRole.Arn
+      Name: !Ref AWS::StackName
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: App
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              Configuration:
+                RepositoryName: SampleRepository
+                BranchName: !Ref MainBranch
+              OutputArtifacts:
+                - Name: CodeCommitCheckoutArtifact
+              RunOrder: 1
+        -
+          Name: Build
+          Actions:
+          -
+            Name: Build
+            ActionTypeId:
+              Category: Build
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            Configuration:
+              ProjectName: !Ref BuildProject
+            RunOrder: 1
+            InputArtifacts:
+              - Name: CodeCommitCheckoutArtifact
+            OutputArtifacts:
+              - Name: BuildOutput
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+
+  ValidateCommitStateMachine:
+    Type: AWS::Serverless::StateMachine
+    DependsOn: StepFunctionPolicy
+    Properties:
+      Definition:
+        StartAt: RunBuild
+        States:
+          RunBuild:
+            Type: Pass
+            End: true
+          RunBuild:
+            Type: Task
+            Resource: arn:aws:states:::codebuild:startBuild.sync
+            Parameters:
+              ProjectName: !Ref BuildProject
+              ArtifactsOverride:
+                Type: NO_ARTIFACTS
+              SourceTypeOverride: CODECOMMIT
+              SourceVersion.$: "$.detail.sourceCommit"
+              SourceLocationOverride: !GetAtt SampleRepository.CloneUrlHttp
+            ResultPath: "$.taskresult"
+            Next: UpdatePullRequest
+          UpdatePullRequest:
+            Type: Task
+            Resource: !GetAtt CommentOnPullRequestFunction.Arn
+            End: true
+
+  ValidateCommitStateMachine:
+    Type: AWS::Serverless::StateMachine
+    DependsOn: StepFunctionPolicy
+    Properties:
+      Role: !GetAtt StepFunctionRole.Arn
+      Definition:
+        StartAt: RunBuild
+        States:
+          RunBuild:
+            Type: Pass
+            End: true
+          RunBuild:
+            Type: Task
+            Resource: arn:aws:states:::codebuild:startBuild.sync
+            Parameters:
+              ProjectName: !Ref BuildProject
+              ArtifactsOverride:
+                Type: NO_ARTIFACTS
+              SourceTypeOverride: CODECOMMIT
+              SourceVersion.$: "$.detail.sourceCommit"
+              SourceLocationOverride: !GetAtt SampleRepository.CloneUrlHttp
+            ResultPath: "$.taskresult"
+            Next: UpdatePullRequest
+          UpdatePullRequest:
+            Type: Task
+            Resource: !GetAtt CommentOnPullRequestFunction.Arn
+            End: true
+      Events:
+        NewPullRequest:
+          Type: CloudWatchEvent
+          Properties:
+            Pattern:
+              source:
+                - aws.codecommit
+              detail-type:
+                - CodeCommit Pull Request State Change
+              detail:
+                event:
+                  - pullRequestCreated
+                destinationReference:
+                  - !Sub "refs/heads/${MainBranch}"
+                sourceReference:
+                  - "anything-but": !Sub "refs/heads/${MainBranch}"
+
+
+  MergeCommitStateMachine:
+    Type: AWS::Serverless::StateMachine
+    DependsOn: StepFunctionPolicy
+    Properties:
+      Role: !GetAtt StepFunctionRole.Arn
+      Definition:
+        StartAt: RunBuild
+        States:
+          RunBuild:
+            Type: Pass
+            End: true
+          RunBuild:
+            Type: Task
+            Resource: arn:aws:states:::codebuild:startBuild.sync
+            Parameters:
+              ProjectName: !Ref BuildProject
+              ArtifactsOverride:
+                Type: NO_ARTIFACTS
+              SourceTypeOverride: CODECOMMIT
+              SourceVersion.$: "$.detail.sourceCommit"
+              SourceLocationOverride: !GetAtt SampleRepository.CloneUrlHttp
+            ResultPath: "$.taskresult"
+            Next: MergePullRequest
+          MergePullRequest:
+            Type: Task
+            Resource: !GetAtt ValidateAndMergePullRequestFunction.Arn
+            End: true
+      Events:
+        ApprovedPullRequest:
+          Type: CloudWatchEvent
+          Properties:
+            Pattern:
+              source:
+                - aws.codecommit
+              detail-type:
+                - CodeCommit Pull Request State Change
+              detail:
+                event:
+                  - pullRequestApprovalStateChanged
+                approvalStatus:
+                  - APPROVE
+                destinationReference:
+                  - !Sub "refs/heads/${MainBranch}"
+                sourceReference:
+                  - "anything-but": !Sub "refs/heads/${MainBranch}"
+                destinationReference:
+                  - !Sub "refs/heads/${MainBranch}"
+                sourceReference:
+                  - "anything-but": !Sub "refs/heads/${MainBranch}"
+
+  CommentOnPullRequestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../functions/pr_updater/
+      Handler: app.lambda_handler
+      Runtime: python3.6
+      Policies:
+      - Statement:
+        - Sid: PostComment
+          Effect: Allow
+          Action:
+            - codecommit:PostCommentForPullRequest
+          Resource: 
+            - !GetAtt SampleRepository.Arn
+            - !Sub "${SampleRepository.Arn}*"
+        - Sid: GetReports
+          Effect: Allow
+          Action:
+            - codebuild:BatchGetReports
+          Resource:
+            - !Sub "arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/${BuildProject}-*"
+
+  ValidateAndMergePullRequestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../functions/pr_merge/
+      Handler: app.lambda_handler
+      Runtime: python3.6
+      Policies:
+      - Statement:
+        - Sid: CodeCommitInteraction
+          Effect: Allow
+          Action:
+            - codecommit:EvaluatePullRequestApprovalRules
+            - codecommit:MergePullRequestBy*
+          Resource: 
+            - !GetAtt SampleRepository.Arn
+            - !Sub "${SampleRepository.Arn}*"
+
+  StepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+  StepFunctionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodeBuildPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - codebuild:BatchGetBuilds
+              - codebuild:StartBuild
+              - codebuild:StopBuild
+            Resource:
+              - !GetAtt BuildProject.Arn
+          - Effect: Allow
+            Action:
+              - codebuild:BatchGetReports
+            Resource:
+              - !Sub "arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/${BuildProject}-*"
+          - Effect: Allow
+            Action:
+              - events:PutTargets
+              - events:PutRule
+              - events:DescribeRule
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource:
+              - !GetAtt CommentOnPullRequestFunction.Arn
+              - !GetAtt ValidateAndMergePullRequestFunction.Arn
+      Roles:
+        - !Ref StepFunctionRole
+Outputs:
+  HTTPSEndpoint:
+    Description: HTTPS Endpoint for CodeCommit Repository
+    Value: !GetAtt SampleRepository.CloneUrlHttp

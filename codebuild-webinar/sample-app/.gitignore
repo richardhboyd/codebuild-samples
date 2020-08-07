@@ -1,0 +1,20 @@
+# visual studio code
+.vscode/
+
+# python
+.env/
+venv/
+virtualenv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+*.egg-info/
+docs/build_*
+
+# misc
+.DS_Store
+
+# Test Output
+test_output/
